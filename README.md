@@ -38,7 +38,7 @@ Self-review the code you just wrote. Actively look for bugs, duplications, overs
 
 ### `/bro-fbombs`
 
-Tally your frustrations over time. Human-invoked only.
+Tally your frustrations over time. Human-invoked only. Takes ~10-15s. OpenCode not yet supported (sessions don't exist in files on disk).
 
 <br/>
 
