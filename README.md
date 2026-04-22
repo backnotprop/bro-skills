@@ -10,11 +10,15 @@
 
 ## install
 
-```sh
-# all skills, globally
-npx skills add backnotprop/bro-skills -g
+All skills, globally:
 
-# just one
+```sh
+npx skills add backnotprop/bro-skills -g
+```
+
+Just one:
+
+```sh
 npx skills add backnotprop/bro-skills --skill bro -g
 ```
 
