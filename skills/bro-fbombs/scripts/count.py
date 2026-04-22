@@ -18,10 +18,11 @@ resumed/forked sessions by their stable message id so the same message
 isn't counted twice. Buckets by day, extends the range from
 first-match to today so quiet weeks show as gaps.
 
-Fast path: per-file and per-line byte prefilter skips anything that
-doesn't match the pattern at all without parsing JSON. Results are
-persisted to ~/.cache/bro-fbombs/cache.json keyed on file mtime so
-warm runs are near-instant.
+Fast path: if `ripgrep` (`rg`) is on PATH, pipe its output straight
+into the parser — rg finds matching lines across the whole session
+corpus in ~1s, roughly an order of magnitude faster than the Python
+equivalent. Falls back to a pure-Python prefilter when rg isn't
+available. Only lines that contain a needle ever get JSON-parsed.
 
 No third-party deps. Python 3.8+.
 """
@@ -32,6 +33,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from collections import Counter
 from datetime import datetime, timedelta
@@ -55,8 +58,11 @@ SALT_PATTERN = (
 SALT_RE = re.compile(SALT_PATTERN, re.IGNORECASE)
 SALT_RE_B = re.compile(SALT_PATTERN.encode("ascii"), re.IGNORECASE)
 
-CACHE_PATH = Path.home() / ".cache" / "bro-fbombs" / "cache.json"
-CACHE_VERSION = 2  # bumped when pattern changes so old counts recompute
+# Same patterns expressed as plain literals for ripgrep's `-e` flags.
+NEEDLES = [
+    "fuck", "wtf", "wth", "ffs", "omfg", "shit",
+    "dumbass", "horrible", "awful", "what the hell",
+]
 
 
 # ---------- per-source extractors ----------
@@ -142,64 +148,91 @@ def _parse_date(ts):
         return None
 
 
-def _load_cache():
-    if not CACHE_PATH.exists():
-        return {}
-    try:
-        obj = json.loads(CACHE_PATH.read_text())
-        if obj.get("version") != CACHE_VERSION:
-            return {}
-        return obj.get("files", {})
-    except Exception:
-        return {}
-
-
-def _save_cache(files_map):
-    try:
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_PATH.write_text(json.dumps(
-            {"version": CACHE_VERSION, "files": files_map},
-            separators=(",", ":"),
-        ))
-    except (OSError, IOError):
-        pass
-
-
-def _scan_file(path, extract):
-    """Open a file, byte-prefilter, and return a list of cache entries
-    (one per fuck-bearing user text fragment). Empty list is fine and
-    is itself cached so we skip this file entirely next run."""
-    try:
-        with open(path, "rb") as f:
-            data = f.read()
-    except (OSError, IOError):
-        return []
-    if not SALT_RE_B.search(data):
-        return []
-
-    entries = []
-    for raw in data.splitlines():
-        if not SALT_RE_B.search(raw):
+def _aggregate(per_day, per_source, seen_keys, name, extract, obj, totals):
+    """Shared aggregation step used by both rg and pure-python paths."""
+    for key, ts, text in extract(obj):
+        n = len(SALT_RE.findall(text))
+        if not n:
             continue
-        try:
-            obj = json.loads(raw)
-        except json.JSONDecodeError:
+        if key in seen_keys:
             continue
-        for key, ts, text in extract(obj):
-            n = len(SALT_RE.findall(text))
-            if n:
-                entries.append({"k": key, "t": ts, "n": n})
-    return entries
+        seen_keys.add(key)
+        d = _parse_date(ts)
+        if d:
+            per_day[d] += n
+        per_source[name] += n
+        totals[0] += n
 
 
-def walk_and_count():
+def _classify(path, roots_map):
+    """Given an absolute path, return (source_name, extractor) or (None, None)."""
+    for root_str, (name, extract) in roots_map.items():
+        if path.startswith(root_str):
+            return name, extract
+    return None, None
+
+
+def _walk_via_ripgrep():
+    """Stream matching lines out of ripgrep and JSON-parse each.
+    Returns None if rg isn't on PATH so the caller can fall back."""
+    if not shutil.which("rg"):
+        return None
+
+    roots = [(name, root, extract) for name, root, extract in SOURCES if root.exists()]
+    if not roots:
+        return (0, Counter(), Counter())
+    roots_map = {str(root): (name, extract) for name, root, extract in roots}
+
+    cmd = ["rg", "-i", "-H", "--no-heading", "--glob", "*.jsonl"]
+    for n in NEEDLES:
+        cmd += ["-e", n]
+    cmd += [str(root) for _, root, _ in roots]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=1024 * 1024,
+        )
+    except (OSError, FileNotFoundError):
+        return None
+
     per_day = Counter()
     per_source = Counter()
-    total = 0
     seen_keys = set()
+    totals = [0]
 
-    cached = _load_cache()
-    fresh = {}
+    # Output format: path:content\n  (rg uses `:` as separator with -H).
+    # Our session-dir paths never contain `:`, so splitting on the first
+    # colon is safe here.
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        raw = raw.rstrip(b"\r\n")
+        sep = raw.find(b":")
+        if sep < 0:
+            continue
+        path = raw[:sep].decode("utf-8", "replace")
+        content = raw[sep + 1:]
+        name, extract = _classify(path, roots_map)
+        if not extract:
+            continue
+        try:
+            obj = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        _aggregate(per_day, per_source, seen_keys, name, extract, obj, totals)
+
+    proc.wait()
+    return totals[0], per_day, per_source
+
+
+def _walk_via_python():
+    """Pure-Python fallback when ripgrep isn't installed."""
+    per_day = Counter()
+    per_source = Counter()
+    seen_keys = set()
+    totals = [0]
 
     for name, root, extract in SOURCES:
         if not root.exists():
@@ -210,33 +243,29 @@ def walk_and_count():
                     continue
                 path = os.path.join(dirpath, fn)
                 try:
-                    mtime = os.path.getmtime(path)
-                except OSError:
+                    with open(path, "rb") as f:
+                        data = f.read()
+                except (OSError, IOError):
                     continue
-
-                # Cache hit: same mtime => content unchanged, skip I/O.
-                hit = cached.get(path)
-                if hit and hit.get("mtime") == mtime and hit.get("source") == name:
-                    entries = hit.get("entries", [])
-                else:
-                    entries = _scan_file(path, extract)
-
-                fresh[path] = {"mtime": mtime, "source": name, "entries": entries}
-
-                for e in entries:
-                    key = e["k"]
-                    if key in seen_keys:
+                if not SALT_RE_B.search(data):
+                    continue
+                for raw in data.splitlines():
+                    if not SALT_RE_B.search(raw):
                         continue
-                    seen_keys.add(key)
-                    n = e["n"]
-                    d = _parse_date(e.get("t"))
-                    if d:
-                        per_day[d] += n
-                    per_source[name] += n
-                    total += n
+                    try:
+                        obj = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    _aggregate(per_day, per_source, seen_keys, name, extract, obj, totals)
 
-    _save_cache(fresh)
-    return total, per_day, per_source
+    return totals[0], per_day, per_source
+
+
+def walk_and_count():
+    result = _walk_via_ripgrep()
+    if result is not None:
+        return result
+    return _walk_via_python()
 
 
 # ---------- Braille line chart ----------
