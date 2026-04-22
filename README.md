@@ -32,9 +32,9 @@ Cuts the jargon. Restate the last message plainly, like a human talking to anoth
 
 Self-review the code you just wrote. Actively look for bugs, duplications, oversights, edge cases, and reusability issues before moving on. Human-invoked only.
 
-### `/bro-fuck-count`
+### `/bro-fbombs`
 
-Tally case-insensitive `fuck` across your Claude Code, Pi, and Codex session files, bucket by day, and print a Braille line chart over all time with stats and per-source breakdown. Deterministic script, no deps. Human-invoked only.
+Tally your frustrations over time. Human-invoked only.
 
 <br/>
 

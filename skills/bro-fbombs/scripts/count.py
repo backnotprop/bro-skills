@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-bro-fuck-count: tally case-insensitive 'fuck' occurrences across your AI
+bro-fbombs: tally frustration-marker occurrences across your AI
 session history and print a Braille line chart over all time.
+
+Counts case-insensitive matches of an aggregated pattern:
+  fuck* | wtf | wth | ffs | omfg | shit(ty|tiest)? | dumbass
+  | horrible | awful | what the hell
 
 Walks three session stores:
   ~/.claude/projects/**/*.jsonl   (Claude Code)
@@ -12,10 +16,12 @@ Only counts text authored by the user (role == "user"), skipping
 tool_result echoes and assistant output. Dedups messages across
 resumed/forked sessions by their stable message id so the same message
 isn't counted twice. Buckets by day, extends the range from
-first-fuck to today so quiet weeks show as gaps.
+first-match to today so quiet weeks show as gaps.
 
 Fast path: per-file and per-line byte prefilter skips anything that
-doesn't contain 'fuck' at all without parsing JSON.
+doesn't match the pattern at all without parsing JSON. Results are
+persisted to ~/.cache/bro-fbombs/cache.json keyed on file mtime so
+warm runs are near-instant.
 
 No third-party deps. Python 3.8+.
 """
@@ -31,11 +37,26 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
-FUCK_RE = re.compile(r"fuck", re.IGNORECASE)
-FUCK_RE_B = re.compile(rb"fuck", re.IGNORECASE)
+# Aggregated "frustration marker" pattern. Longer phrases listed first
+# so alternation prefers them over the shorter substrings they contain
+# (leftmost-first match semantics of Python re).
+SALT_PATTERN = (
+    r"what the hell"
+    r"|fuck"
+    r"|shit(?:ty|tiest)?"
+    r"|dumbass"
+    r"|horrible"
+    r"|awful"
+    r"|wtf"
+    r"|wth"
+    r"|ffs"
+    r"|omfg"
+)
+SALT_RE = re.compile(SALT_PATTERN, re.IGNORECASE)
+SALT_RE_B = re.compile(SALT_PATTERN.encode("ascii"), re.IGNORECASE)
 
-CACHE_PATH = Path.home() / ".cache" / "bro-fuck-count" / "cache.json"
-CACHE_VERSION = 1
+CACHE_PATH = Path.home() / ".cache" / "bro-fbombs" / "cache.json"
+CACHE_VERSION = 2  # bumped when pattern changes so old counts recompute
 
 
 # ---------- per-source extractors ----------
@@ -153,19 +174,19 @@ def _scan_file(path, extract):
             data = f.read()
     except (OSError, IOError):
         return []
-    if not FUCK_RE_B.search(data):
+    if not SALT_RE_B.search(data):
         return []
 
     entries = []
     for raw in data.splitlines():
-        if not FUCK_RE_B.search(raw):
+        if not SALT_RE_B.search(raw):
             continue
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError:
             continue
         for key, ts, text in extract(obj):
-            n = len(FUCK_RE.findall(text))
+            n = len(SALT_RE.findall(text))
             if n:
                 entries.append({"k": key, "t": ts, "n": n})
     return entries
@@ -311,11 +332,11 @@ def main():
     total, per_day, per_source = walk_and_count()
 
     print()
-    print(c("  f-bomb tracker", C_BOLD) + c("  — all sources, all time", C_MUTED))
+    print(c("  f-bombs", C_BOLD) + c("  — all sources, all time", C_MUTED))
     print()
 
     if total == 0:
-        print(c("  no fucks found. everything fine?", C_MUTED))
+        print(c("  no hits. serene.", C_MUTED))
         print()
         return
 
