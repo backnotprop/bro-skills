@@ -9,26 +9,39 @@ Walks three session stores:
   ~/.codex/sessions/**/*.jsonl    (Codex)
 
 Only counts text authored by the user (role == "user"), skipping
-tool_result echoes and assistant output. Buckets by day, extends the
-range from first-fuck to today so quiet weeks show as gaps.
+tool_result echoes and assistant output. Dedups messages across
+resumed/forked sessions by their stable message id so the same message
+isn't counted twice. Buckets by day, extends the range from
+first-fuck to today so quiet weeks show as gaps.
+
+Fast path: per-file and per-line byte prefilter skips anything that
+doesn't contain 'fuck' at all without parsing JSON.
 
 No third-party deps. Python 3.8+.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import sys
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 FUCK_RE = re.compile(r"fuck", re.IGNORECASE)
+FUCK_RE_B = re.compile(rb"fuck", re.IGNORECASE)
+
+CACHE_PATH = Path.home() / ".cache" / "bro-fuck-count" / "cache.json"
+CACHE_VERSION = 1
 
 
 # ---------- per-source extractors ----------
+# Each yields (dedup_key, timestamp_str, text) for every user-authored
+# text fragment in a line. dedup_key must be stable across session
+# resume/fork so the same logical message dedupes out.
 
 def _extract_claude(obj):
     if obj.get("type") != "user":
@@ -36,16 +49,21 @@ def _extract_claude(obj):
     msg = obj.get("message") or {}
     if msg.get("role") != "user":
         return
+    uuid = obj.get("uuid")
+    if not uuid:
+        return
     ts = obj.get("timestamp")
     content = msg.get("content")
     if isinstance(content, str):
-        yield ts, content
+        yield uuid, ts, content
     elif isinstance(content, list):
-        for item in content:
+        for idx, item in enumerate(content):
             if isinstance(item, dict) and item.get("type") == "text":
                 t = item.get("text") or ""
                 if t:
-                    yield ts, t
+                    # Qualify key with part index so multi-part messages
+                    # still dedup cleanly without collapsing distinct parts.
+                    yield f"{uuid}#{idx}", ts, t
 
 
 def _extract_pi(obj):
@@ -54,14 +72,17 @@ def _extract_pi(obj):
     msg = obj.get("message") or {}
     if msg.get("role") != "user":
         return
+    mid = obj.get("id")
+    if not mid:
+        return
     ts = obj.get("timestamp")
     content = msg.get("content") or []
     if isinstance(content, list):
-        for item in content:
+        for idx, item in enumerate(content):
             if isinstance(item, dict) and item.get("type") == "text":
                 t = item.get("text") or ""
                 if t:
-                    yield ts, t
+                    yield f"{mid}#{idx}", ts, t
 
 
 def _extract_codex(obj):
@@ -73,11 +94,13 @@ def _extract_codex(obj):
     ts = obj.get("timestamp")
     content = payload.get("content") or []
     if isinstance(content, list):
-        for item in content:
+        for idx, item in enumerate(content):
             if isinstance(item, dict) and item.get("type") == "input_text":
                 t = item.get("text") or ""
                 if t:
-                    yield ts, t
+                    # Codex lines have no stable id; use (ts, content hash).
+                    h = hashlib.sha1(t.encode("utf-8", "replace")).hexdigest()[:16]
+                    yield f"{ts}-{h}#{idx}", ts, t
 
 
 SOURCES = [
@@ -98,42 +121,106 @@ def _parse_date(ts):
         return None
 
 
+def _load_cache():
+    if not CACHE_PATH.exists():
+        return {}
+    try:
+        obj = json.loads(CACHE_PATH.read_text())
+        if obj.get("version") != CACHE_VERSION:
+            return {}
+        return obj.get("files", {})
+    except Exception:
+        return {}
+
+
+def _save_cache(files_map):
+    try:
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CACHE_PATH.write_text(json.dumps(
+            {"version": CACHE_VERSION, "files": files_map},
+            separators=(",", ":"),
+        ))
+    except (OSError, IOError):
+        pass
+
+
+def _scan_file(path, extract):
+    """Open a file, byte-prefilter, and return a list of cache entries
+    (one per fuck-bearing user text fragment). Empty list is fine and
+    is itself cached so we skip this file entirely next run."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except (OSError, IOError):
+        return []
+    if not FUCK_RE_B.search(data):
+        return []
+
+    entries = []
+    for raw in data.splitlines():
+        if not FUCK_RE_B.search(raw):
+            continue
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        for key, ts, text in extract(obj):
+            n = len(FUCK_RE.findall(text))
+            if n:
+                entries.append({"k": key, "t": ts, "n": n})
+    return entries
+
+
 def walk_and_count():
     per_day = Counter()
     per_source = Counter()
     total = 0
+    seen_keys = set()
+
+    cached = _load_cache()
+    fresh = {}
+
     for name, root, extract in SOURCES:
         if not root.exists():
             continue
-        for path in root.rglob("*.jsonl"):
-            try:
-                with open(path, "r", errors="replace") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        for ts, text in extract(obj):
-                            n = len(FUCK_RE.findall(text))
-                            if not n:
-                                continue
-                            d = _parse_date(ts)
-                            if d:
-                                per_day[d] += n
-                            per_source[name] += n
-                            total += n
-            except (OSError, IOError):
-                continue
+        for dirpath, _, filenames in os.walk(str(root)):
+            for fn in filenames:
+                if not fn.endswith(".jsonl"):
+                    continue
+                path = os.path.join(dirpath, fn)
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    continue
+
+                # Cache hit: same mtime => content unchanged, skip I/O.
+                hit = cached.get(path)
+                if hit and hit.get("mtime") == mtime and hit.get("source") == name:
+                    entries = hit.get("entries", [])
+                else:
+                    entries = _scan_file(path, extract)
+
+                fresh[path] = {"mtime": mtime, "source": name, "entries": entries}
+
+                for e in entries:
+                    key = e["k"]
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    n = e["n"]
+                    d = _parse_date(e.get("t"))
+                    if d:
+                        per_day[d] += n
+                    per_source[name] += n
+                    total += n
+
+    _save_cache(fresh)
     return total, per_day, per_source
 
 
 # ---------- Braille line chart ----------
 
 BRAILLE_BASE = 0x2800
-# Mapping (sub_x in 0..1, sub_y in 0..3) -> Braille dot bit
 DOT_BIT = {
     (0, 0): 0x01, (0, 1): 0x02, (0, 2): 0x04, (0, 3): 0x40,
     (1, 0): 0x08, (1, 1): 0x10, (1, 2): 0x20, (1, 3): 0x80,
@@ -175,12 +262,10 @@ def render_chart(counts, width=72, height=14):
     if n == 0:
         return "(no data)"
 
-    # Bucket by max-per-bucket if we have more days than horizontal pixels;
-    # max-preserving keeps peaks visible instead of averaging them away.
+    # Max-preserving bucketing keeps peaks visible when the window is wide.
     if n > px_w:
         bucket = (n + px_w - 1) // px_w
-        bucketed = [max(counts[i:i + bucket]) for i in range(0, n, bucket)]
-        counts = bucketed
+        counts = [max(counts[i:i + bucket]) for i in range(0, n, bucket)]
         n = len(counts)
 
     max_c = max(counts) or 1
@@ -189,12 +274,9 @@ def render_chart(counts, width=72, height=14):
     def y_pixel(c):
         return int((1 - c / max_c) * (px_h - 1))
 
-    # Draw connecting line
     for i in range(n - 1):
         for px, py in _bresenham(xs[i], y_pixel(counts[i]), xs[i + 1], y_pixel(counts[i + 1])):
             _set_pixel(grid, px, py, px_w, px_h)
-
-    # Mark each point
     for i, c in enumerate(counts):
         _set_pixel(grid, xs[i], y_pixel(c), px_w, px_h)
 
@@ -211,8 +293,8 @@ def _use_color():
     return True
 
 
-C_ACCENT = "\033[38;5;208m"   # burnt orange
-C_MUTED  = "\033[38;5;244m"   # warm gray
+C_ACCENT = "\033[38;5;208m"
+C_MUTED  = "\033[38;5;244m"
 C_BOLD   = "\033[1m"
 C_RESET  = "\033[0m"
 
@@ -237,12 +319,11 @@ def main():
         print()
         return
 
-    # Build contiguous day range: first fuck -> today
-    first_fuck_day = min(per_day.keys())
+    first_day = min(per_day.keys())
     today = datetime.now().date()
     end = max(today, max(per_day.keys()))
 
-    all_days, cur = [], first_fuck_day
+    all_days, cur = [], first_day
     while cur <= end:
         all_days.append(cur)
         cur += timedelta(days=1)
@@ -252,7 +333,6 @@ def main():
     max_c = max(counts)
     chart = render_chart(counts, width=width, height=height)
 
-    # Y-axis labels at top/bottom
     y_label_w = 5
     top_lbl = f"{max_c:>{y_label_w}}"
     bot_lbl = f"{0:>{y_label_w}}"
@@ -267,32 +347,27 @@ def main():
             prefix = " " * y_label_w
         print(f"{prefix} {c('│', C_MUTED)} {c(line, C_ACCENT)}")
 
-    # X-axis
     axis = c("└" + "─" * width, C_MUTED)
     print(f"{' ' * y_label_w} {axis}")
 
-    # Date labels: start, middle, end
-    start_lbl = first_fuck_day.strftime("%b %Y").lower()
-    mid_day = first_fuck_day + (end - first_fuck_day) / 2
+    start_lbl = first_day.strftime("%b %Y").lower()
+    mid_day = first_day + (end - first_day) / 2
     mid_lbl = mid_day.strftime("%b %Y").lower()
     end_lbl = end.strftime("%b %Y").lower()
 
     axis_line = [" "] * width
-    # Place labels, clipped to axis
     def place(label, col):
         col = max(0, min(col, width - len(label)))
         for i, ch in enumerate(label):
             if col + i < width:
                 axis_line[col + i] = ch
-
     place(start_lbl, 0)
     place(mid_lbl, (width - len(mid_lbl)) // 2)
     place(end_lbl, width - len(end_lbl))
     print(f"{' ' * (y_label_w + 2)}{c(''.join(axis_line), C_MUTED)}")
     print()
 
-    # Stats block
-    span_days = (end - first_fuck_day).days + 1
+    span_days = (end - first_day).days + 1
     peak_day = max(per_day, key=per_day.get)
     mean = total / span_days
 
@@ -300,7 +375,7 @@ def main():
         print(f"  {c(label.ljust(12), C_MUTED)}{value}")
 
     stat("total",      c(f"{total:,}", C_BOLD + C_ACCENT))
-    stat("span",       f"{span_days:,} days  ({first_fuck_day}  →  {end})")
+    stat("span",       f"{span_days:,} days  ({first_day}  →  {end})")
     stat("mean/day",   f"{mean:.2f}")
     stat("peak",       c(f"{per_day[peak_day]}", C_BOLD) + f"  on  {peak_day}")
     print()
