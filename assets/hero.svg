@@ -1,0 +1,160 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 540" width="1000" role="img" aria-label="A dense two-column wall of structured agent output fades to muted, /bro appears, and a short prose summary reveals beneath it.">
+  <title>bro: cuts through the wall</title>
+  <style>
+    :root {
+      --bg: #F6EFDF;
+      --ink: #1A1410;
+      --muted: #B5AA95;
+      --accent: #D4502B;
+      --rule: #E0D4BC;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #14100B;
+        --ink: #F6EFDF;
+        --muted: #4E463A;
+        --accent: #E67046;
+        --rule: #2C2418;
+      }
+    }
+
+    .bg { fill: var(--bg); }
+
+    .mono {
+      font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+      fill: var(--ink);
+      font-size: 11.5px;
+      letter-spacing: 0;
+    }
+    .mono-head { font-weight: 700; font-size: 12px; }
+    .mono-sub  { font-weight: 700; }
+
+    .accent-fill { fill: var(--accent); }
+
+    .marker {
+      font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+      font-size: 11.5px;
+      font-weight: 700;
+      letter-spacing: 2.4px;
+      text-transform: uppercase;
+    }
+
+    .prose {
+      font-family: Georgia, "Iowan Old Style", "Charter", serif;
+      font-size: 28px;
+      font-weight: 400;
+      letter-spacing: -0.2px;
+      fill: var(--ink);
+    }
+
+    .rule {
+      stroke: var(--rule);
+      stroke-width: 1;
+      stroke-linecap: round;
+    }
+
+    /* 9s loop — long enough to actually read the wall first */
+
+    @keyframes agent-dim {
+      0%, 14% { opacity: 1; }
+      30%, 90% { opacity: 0.22; }
+      100% { opacity: 1; }
+    }
+    @keyframes marker-in {
+      0%, 30% { opacity: 0; }
+      40%, 90% { opacity: 1; }
+      100% { opacity: 0; }
+    }
+    @keyframes prose-1 {
+      0%, 40% { opacity: 0; transform: translateY(8px); }
+      52%, 90% { opacity: 1; transform: translateY(0); }
+      100% { opacity: 0; transform: translateY(8px); }
+    }
+    @keyframes prose-2 {
+      0%, 48% { opacity: 0; transform: translateY(8px); }
+      60%, 90% { opacity: 1; transform: translateY(0); }
+      100% { opacity: 0; transform: translateY(8px); }
+    }
+
+    .agent-block { animation: agent-dim 9s ease-in-out infinite; }
+    .marker-group { animation: marker-in 9s ease-out infinite; }
+    .p1 { animation: prose-1 9s ease-out infinite; }
+    .p2 { animation: prose-2 9s ease-out infinite; }
+
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; }
+      .agent-block { opacity: 0.22; }
+      .marker-group, .p1, .p2 { opacity: 1; transform: none; }
+    }
+  </style>
+
+  <rect class="bg" width="1000" height="540"/>
+
+  <!-- ============ AGENT WALL ============ -->
+  <g class="agent-block">
+
+    <!-- LEFT COLUMN -->
+    <g>
+      <text class="mono mono-head" x="60" y="46">## real dead code (new this round)</text>
+
+      <text class="mono mono-sub"  x="60" y="76">1. AdminErrorCode.InvalidState:</text>
+      <text class="mono"           x="60" y="90">   structurally unreachable.</text>
+      <text class="mono"           x="60" y="108">   - handleAdminCommand → checkRoomLifecycle</text>
+      <text class="mono"           x="60" y="122">     at room-do.ts:695</text>
+      <text class="mono"           x="60" y="136">   - terminal status closes the socket and</text>
+      <text class="mono"           x="60" y="150">     returns null (lines 334-341)</text>
+      <text class="mono"           x="60" y="164">   - line 696: if (!roomState) return; bails</text>
+      <text class="mono"           x="60" y="178">     before applyDelete is reached</text>
+      <text class="mono"           x="60" y="192">   - defensive check at 738-741 is dead shape</text>
+      <text class="mono"           x="60" y="206">   - only emit site for the error code</text>
+      <text class="mono"           x="60" y="220">   action: remove InvalidState from the enum,</text>
+      <text class="mono"           x="60" y="234">   dead branch, ADMIN_SCOPED_ERROR_CODES entry</text>
+
+      <text class="mono mono-sub"  x="60" y="262">2. validation.ts:206 else-branch unreachable</text>
+      <text class="mono"           x="60" y="278">   - VALID_ADMIN_COMMANDS.has(cmd.type) gates</text>
+      <text class="mono"           x="60" y="292">     against the Set {'room.delete'}</text>
+      <text class="mono"           x="60" y="306">   - by L220, cmd.type provably 'room.delete'</text>
+      <text class="mono"           x="60" y="320">   action: collapse if/else to</text>
+      <text class="mono"           x="60" y="334">   sanitizedCommand = { type: 'room.delete' }</text>
+    </g>
+
+    <!-- RIGHT COLUMN -->
+    <g>
+      <text class="mono mono-head" x="540" y="46">## cosmetic / lock-era shape</text>
+
+      <text class="mono mono-sub"  x="540" y="76">3. client.ts:1290 resolver dance:</text>
+      <text class="mono"           x="540" y="90">   shouldResolve flag flip, vestigial</text>
+      <text class="mono"           x="540" y="104">   3-command shape. reduce to direct if.</text>
+
+      <text class="mono mono-sub"  x="540" y="132">4. "V1 assumes" comments at</text>
+      <text class="mono"           x="540" y="146">   client.ts:1282-1285, types.ts:66:</text>
+      <text class="mono"           x="540" y="160">   stale multi-capability phrasing.</text>
+
+      <text class="mono mono-head" x="540" y="188">## flagged, decision stands</text>
+      <text class="mono"           x="540" y="204">- _exhaustive never default: forward-proofing</text>
+      <text class="mono"           x="540" y="218">- AdminAction='delete' single-member slot</text>
+
+      <text class="mono mono-head" x="540" y="246">## confirmed false positives</text>
+      <text class="mono"           x="540" y="262">- archive read-only viewer (unrelated)</text>
+      <text class="mono"           x="540" y="276">- Cache-Control: immutable (HTTP, unrelated)</text>
+      <text class="mono"           x="540" y="290">- &lt;input readOnly&gt; DOM attribute</text>
+      <text class="mono"           x="540" y="304">- "locked down" CSP, .lock session extension</text>
+
+      <text class="mono mono-head" x="540" y="324">## out of scope</text>
+      <text class="mono"           x="540" y="340">rec: atomic commit. ~15 LOC cut.</text>
+    </g>
+
+  </g>
+
+  <!-- divider -->
+  <line class="rule" x1="60" y1="382" x2="940" y2="382"/>
+
+  <!-- /bro marker -->
+  <g class="marker-group">
+    <text class="marker accent-fill" x="60" y="412">/ bro</text>
+  </g>
+
+  <!-- prose response -->
+  <text class="prose p1" x="60" y="464">five agents looked. four came back clean.</text>
+  <text class="prose p2" x="60" y="504">one found a real dead-code pocket nobody else caught.</text>
+</svg>
