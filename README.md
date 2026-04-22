@@ -4,7 +4,7 @@
 
 <h1 align="center">bro-skills</h1>
 
-<p align="center">a growing set of skills for talking to coding agents like a human.</p>
+<p align="center">a growing set of skills for doing better work more simply.</p>
 
 <br/>
 
