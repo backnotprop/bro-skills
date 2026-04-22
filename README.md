@@ -28,6 +28,10 @@ Works with Claude Code, Codex, Cursor, OpenCode, and any other skills-compatible
 
 Cuts the jargon. Restate the last message plainly, like a human talking to another human. Human-invoked only.
 
+### `/bro-self-review`
+
+Self-review the code you just wrote. Actively look for bugs, duplications, oversights, edge cases, and reusability issues before moving on. Human-invoked only.
+
 <br/>
 
 ## license
